@@ -1,0 +1,25 @@
+# Deep Learning & Visão Computacional
+ultralytics>=8.0.0
+torch>=2.0.0
+torchvision>=0.15.0
+opencv-python>=4.8.0
+
+# Processamento de Imagem
+Pillow>=10.0.0
+numpy>=1.24.0
+
+# API e Servidor
+flask>=3.0.0
+requests>=2.31.0
+
+# Utilitários de Pipeline
+tqdm>=4.65.0
+PyYAML>=6.0.0
+pandas>=2.0.0
+matplotlib>=3.7.0
+scikit-learn>=1.3.0
+
+# Cliente Desktop (Captura de Tela)
+mss>=9.0.0
+pynput>=1.7.6
+pystray>=0.19.5
