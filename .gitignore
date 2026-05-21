@@ -1,8 +1,26 @@
 __pycache__/
 *.pyc
+*.pyo
 .venv/
+venv/
 .env
-/data/
-/runs/
+
+# Dados brutos e sintéticos (grandes demais para git)
+data/raw/
+data/synthetic/
+
+# Pesos e resultados de treino
+runs/
 *.pt
+*.onnx
+
+# Sistema
 .DS_Store
+Thumbs.db
+
+# IDEs
+.vscode/
+.idea/
+
+# Jupyter
+.ipynb_checkpoints/
