@@ -7,16 +7,29 @@ Métrica principal: Recall de Kanjis
 
 Usa esta métrica pois o Manga109 provê ground truth textual (a frase),
 não coordenadas individuais por caractere — impossibilitando o cálculo de mAP.
+
+A função predict_kanjis() é exportada e reutilizada por manga109_corpus.py.
 """
 import os
 import json
 import argparse
 from tqdm import tqdm
 
-from ultralytics import YOLO
+
+def predict_kanjis(model, img, conf):
+    """Roda YOLO em img (caminho, PIL ou numpy) e retorna set de labels (excl. UNKNOWN_N1)."""
+    detected = set()
+    for r in model.predict(img, conf=conf, verbose=False):
+        for box in r.boxes:
+            label = model.names[int(box.cls[0])]
+            if label != "UNKNOWN_N1":
+                detected.add(label)
+    return detected
 
 
 def validate_complex_scenes(model_path, metadata_path, images_dir, conf=0.25):
+    from ultralytics import YOLO  # import lazy — não carrega ao importar predict_kanjis
+
     print(f"Carregando modelo: {model_path}")
     model = YOLO(model_path)
 
@@ -38,14 +51,7 @@ def validate_complex_scenes(model_path, metadata_path, images_dir, conf=0.25):
         if not gt_kanjis:
             continue
 
-        results = model.predict(img_path, conf=conf, verbose=False)
-
-        pred_kanjis = set()
-        for r in results:
-            for box in r.boxes:
-                label = model.names[int(box.cls[0])]
-                if label != "UNKNOWN_N1":
-                    pred_kanjis.add(label)
+        pred_kanjis = predict_kanjis(model, img_path, conf)
 
         acertos = gt_kanjis & pred_kanjis
         total_gt += len(gt_kanjis)
@@ -86,9 +92,9 @@ def validate_complex_scenes(model_path, metadata_path, images_dir, conf=0.25):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Validação complexa do modelo N2-N5.")
-    parser.add_argument("--model", required=True, help="Caminho para best.pt")
+    parser.add_argument("--model",    required=True, help="Caminho para best.pt")
     parser.add_argument("--metadata", required=True, help="val_complex_metadata.json")
-    parser.add_argument("--images", required=True, help="Pasta com imagens de validação")
+    parser.add_argument("--images",   required=True, help="Pasta com imagens de validação")
     parser.add_argument("--conf", type=float, default=0.25)
     args = parser.parse_args()
     validate_complex_scenes(args.model, args.metadata, args.images, args.conf)
