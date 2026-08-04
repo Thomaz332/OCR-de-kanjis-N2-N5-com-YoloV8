@@ -108,7 +108,11 @@ ocr-de-kanjis-n2-n5-com-yolov8/
 ├── docs/
 │   └── relatorio_n2_n5.md              # Relatório científico completo
 ├── notebooks/
-│   └── Kaggle_Training_Pipeline.ipynb  # Pipeline Kaggle/Colab (GPU)
+│   ├── Kaggle_Training_Pipeline.ipynb  # Pipeline Kaggle/Colab (GPU)
+│   └── kernel-metadata.json            # Metadados do kernel Kaggle (gerado/atualizado pelo pipeline)
+├── scripts/
+│   └── kaggle_pipeline.py              # Automação do treino no Kaggle via CLI (push/status/download/dataset)
+├── kaggle_config.json                  # Estado local do pipeline (datasets/checkpoints a reaproveitar)
 └── src/
     ├── data/
     │   ├── download_fonts.py            # Baixa fontes CJK
@@ -213,6 +217,65 @@ python src/preprocessing/validate_complex.py \
     --metadata data/processed/n2_n5/val_complex_metadata.json \
     --images data/processed/n2_n5/val_complex
 ```
+
+---
+
+## Automação do Treino no Kaggle (CLI)
+
+Em vez de treinar pela interface web do Kaggle (clicar em "+ Add Input", editar
+variáveis no notebook, "Save & Run All" manualmente a cada tentativa), o
+repositório inclui um pipeline de linha de comando que faz push do notebook,
+espera a execução terminar, baixa os resultados e prepara tudo para a próxima
+rodada reaproveitar o checkpoint — sem abrir o navegador.
+
+### 1. Instalar a CLI e configurar credenciais
+
+```bash
+pip install kaggle
+```
+
+Gere um token em **https://www.kaggle.com/settings/api** ("Create New Token"),
+que baixa um arquivo `kaggle.json`. Salve-o em:
+
+```
+%USERPROFILE%\.kaggle\kaggle.json      (ex: C:\Users\<usuário>\.kaggle\kaggle.json)
+```
+
+### 2. Peças do pipeline
+
+| Arquivo | Papel |
+|---|---|
+| `notebooks/Kaggle_Training_Pipeline.ipynb` | Notebook que roda no Kaggle. A célula `PIPELINE_CONFIG` (logo após clonar o repo) controla se o dataset sintético e o checkpoint são reaproveitados. |
+| `notebooks/kernel-metadata.json` | Metadados do kernel (`id`, `code_file`, `enable_gpu`, `dataset_sources`). O campo `dataset_sources` é reescrito pelo pipeline a cada push — substitui o "+ Add Input" manual. |
+| `kaggle_config.json` | Estado local: slug do kernel, e slugs/caminhos dos datasets de checkpoint e dataset sintético mais recentes. |
+| `scripts/kaggle_pipeline.py` | Script que orquestra tudo via `kaggle` CLI. |
+
+### 3. Rodar
+
+```bash
+python scripts/kaggle_pipeline.py --run
+```
+
+Isso faz, em sequência:
+1. Grava `synthetic_dataset_path`/`checkpoint_path` (de `kaggle_config.json`) diretamente na célula `PIPELINE_CONFIG` do `.ipynb` local.
+2. Atualiza `dataset_sources` em `kernel-metadata.json` com os datasets a anexar como Input.
+3. `kaggle kernels push` — sobe a nova versão do notebook.
+4. Faz *polling* do status (`kaggle kernels status`) a cada 5 min (`--poll-interval`) até `COMPLETE`, `ERROR` ou cancelamento (`CANCEL_ACKNOWLEDGED`/`CANCEL_REQUESTED` — típico de estourar as 12h por commit ou a cota semanal de GPU). Limite local de segurança: 12h30 (`--max-wait`).
+5. `kaggle kernels output` — baixa tudo em `kaggle_runs/<timestamp>/`, mesmo que a execução tenha sido cancelada (para recuperar o checkpoint parcial).
+6. Localiza os pesos (`yolo_kanji/n2_n5_model/weights/last.pt`) e cria/versiona (`kaggle datasets create`/`version`) um dataset de checkpoint; atualiza `kaggle_config.json` com o caminho de montagem (`/kaggle/input/...`) para a próxima rodada retomar o treino em vez de recomeçar do zero. Na primeira vez em que o dataset sintético é gerado do zero (sem cache), também cria um dataset com ele, para nunca mais precisar reprocessar as ~98 mil imagens.
+
+Comandos individuais (útil se o terminal cair no meio do processo):
+
+```bash
+python scripts/kaggle_pipeline.py --push                        # só sobe uma nova versão
+python scripts/kaggle_pipeline.py --status                      # só espera/poll do status
+python scripts/kaggle_pipeline.py --download                    # só baixa a última saída
+python scripts/kaggle_pipeline.py --dataset --output-dir kaggle_runs/<timestamp>  # só cria/versiona os datasets
+```
+
+Flags úteis: `--poll-interval SEGUNDOS`, `--max-wait SEGUNDOS`, `--message "texto"` (nota de versão do dataset), `--skip-synthetic-dataset` (não cria o dataset sintético automaticamente).
+
+> **Atenção:** na primeiríssima rodada (sem checkpoint nem dataset sintético em cache), o notebook vai gerar as ~98.000 imagens do zero (~2h de CPU) e o download/upload do dataset sintético completo pode demorar — isso acontece só uma vez. Datasets são criados como **privados** por padrão.
 
 ---
 

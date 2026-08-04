@@ -166,16 +166,60 @@ Isso otimiza latência para a maioria dos casos de uso (leitura de mangá comum)
 
 ---
 
-## 7. Conclusão e Trabalhos Futuros
+## 7. Resultados do Treinamento e Limitação de Escala Identificada
+
+### 7.1 Execução do Treinamento
+
+O treinamento das 50 épocas foi executado no Kaggle (GPU Tesla T4) via o pipeline de automação descrito em `scripts/kaggle_pipeline.py`, e precisou ser dividido em **duas sessões** devido ao limite de 12h por commit do Kaggle: a primeira sessão treinou as épocas 1–23 antes de ser cancelada, e a segunda **retomou automaticamente a partir do checkpoint** (`resume=True` do ultralytics, carregando `last.pt` da época 23) até completar a época 50/50.
+
+**Métricas finais (época 50, validação sintética):**
+
+| Métrica | Valor |
+|---|---|
+| mAP@50 | 0.9933 |
+| mAP@50-95 | 0.9905 |
+| Precisão | 0.9797 |
+| Recall (detecção, validação sintética) | 0.9836 |
+
+Esses números confirmam convergência sólida **dentro da distribuição sintética** — ou seja, em imagens geradas pelo mesmo processo que gerou o conjunto de treino. Como discutido a seguir, isso não é garantia de desempenho em cenas reais.
+
+### 7.2 Limitação de Escala Identificada (Teste Qualitativo Pós-Treino)
+
+Após o treinamento, o modelo (`best.pt`) foi testado qualitativamente em três imagens para investigar a generalização fora da distribuição sintética:
+
+| Teste | Conteúdo | Escala do kanji | Resultado |
+|---|---|---|---|
+| A — Capa de mangá real | Título estilizado (同級生), fundo fotográfico | Pequena, dentro de uma cena complexa | **0 detecções** (mesmo com `conf` reduzido a 0.05, único achado foi 1 falso positivo a 7.8% de confiança, numa região sem kanji) |
+| B — Balão sintético | Kanjis reais N2-N5 (今日学校), mesma fonte do treino (NotoSansCJKjp) | Pequena, embutida num balão de fala dentro de um painel | **0 detecções** |
+| C — Controle | Kanji real N4 (学), mesma fonte, mesmo tamanho relativo do treino | Cheia (preenchendo 50-90% do quadro, como no treino) | **Detectado corretamente** (`学`, confiança 0.59) |
+
+**Diagnóstico:** a comparação entre os testes B e C isola a variável responsável pela falha. Ambos usam kanjis reais do vocabulário treinado e a mesma fonte — a única diferença é a **escala e o contexto de cena**. Isso indica que a causa raiz não é o estilo tipográfico (hipótese inicial), mas sim uma limitação estrutural do dataset de treino: `generate_synthetic_images.py` sempre desenha o kanji ocupando 50–90% do quadro 640×640, centralizado, sem simular um kanji pequeno inserido numa página ou balão de fala maior. O modelo nunca foi exposto a essa variação de escala durante o treino, então não generaliza para ela — mesmo tendo aprendido muito bem o reconhecimento do caractere em si.
+
+Esse achado é consistente com a limitação já prevista na Seção 3.4 (necessidade de validação real via Manga109) e a torna ainda mais crítica: o mAP@50 sintético de 99.3% mede apenas a capacidade de classificação/localização em escala fixa, não a capacidade de **encontrar** o kanji dentro de uma página real.
+
+### 7.3 Correções Aplicadas ao Gerador Sintético
+
+Em resposta ao diagnóstico da Seção 7.2, `src/data/generate_synthetic_images.py` foi ajustado:
+
+1. **Variação de escala e posição:** 45% das imagens agora desenham o kanji em escala pequena (12–35% do quadro) e posição aleatória, em vez de sempre centralizado ocupando 50–90% do quadro. Os 55% restantes mantêm o comportamento original.
+2. **Bug de cálculo de bounding box corrigido:** ao implementar (1), foi descoberto que o cálculo da bbox (baseado em pixels "escuros" com limiar fixo em 240) já era incorreto mesmo antes dessa mudança — o fundo é sorteado em tons de cinza claro (230–255) e, sempre que o valor sorteado caía abaixo do limiar fixo, a imagem **inteira** contava como parte do kanji, inflando a bbox para o quadro inteiro. Esse bug estava mascarado porque o kanji já ocupava a maior parte do quadro; tornou-se visível (e crítico) ao testar escalas pequenas, onde ~40% das imagens de teste apresentaram bbox = quadro inteiro. A correção usa um limiar relativo à cor de fundo real de cada imagem (estimada pela mediana dos 4 cantos), não mais um valor absoluto. Validado em 200 gerações de teste sem nenhuma recorrência do bug.
+
+Esse dataset corrigido ainda não foi usado para treinar um novo modelo — o treino de 50 épocas descrito na Seção 7.1 usa o dataset **anterior** à correção (escala fixa). O retreino com o dataset corrigido é o próximo passo natural (ver Trabalhos Futuros).
+
+---
+
+## 8. Conclusão e Trabalhos Futuros
 
 ### Contribuições deste Módulo
 
 1. **Pipeline de normalização por frequência:** Demonstra que dataset sintético balanceado supera dados reais desbalanceados para reconhecimento de caracteres com distribuição Zipfiana
 2. **Classe UNKNOWN_N1 como mecanismo de delegação:** Abordagem de Open Set Recognition para sistemas multi-modelo em cascata
 3. **Recall de Kanjis como métrica alternativa:** Métrica semanticamente válida quando Ground Truth geométrico não está disponível
+4. **Pipeline de automação de treino no Kaggle:** Push/polling/resume via `scripts/kaggle_pipeline.py`, permitindo treinar através de múltiplas sessões limitadas a 12h sem intervenção manual (ver Seção 7.1)
 
 ### Trabalhos Futuros
 
+- **Retreino com dataset de escala corrigida:** `generate_synthetic_images.py` já foi ajustado (Seção 7.3) para gerar kanjis em escalas variadas; falta rodar um novo ciclo de treino no Kaggle com esse dataset corrigido e repetir os testes qualitativos da Seção 7.2 para confirmar a melhoria
 - **Distilação do modelo:** Treinar um modelo YOLOv8s (Small) com os pesos do Nano como teacher para ganhar precisão em N2
 - **Dataset real aumentado:** Integrar dados reais do Manga109 com pesos de amostragem para substituir o dataset puramente sintético na fase final
 - **Filtragem por confiança adaptativa:** Threshold dinâmico baseado na complexidade visual do frame capturado

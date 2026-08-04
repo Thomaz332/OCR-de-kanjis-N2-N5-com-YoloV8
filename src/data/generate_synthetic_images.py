@@ -17,6 +17,45 @@ def load_fonts(font_dir):
     return font_files
 
 
+def _compute_dark_pixel_bbox(img):
+    gray = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2GRAY)
+
+    # O limiar de "escuro" precisa ser relativo ao fundo real da imagem, não
+    # um valor absoluto fixo. bg_color é sorteado em [230, 255] por canal
+    # (ver generate_class_images) -- sempre que o fundo sorteado cai abaixo
+    # de um limiar fixo tipo 240, a imagem inteira (não só o kanji) contava
+    # como "escura" na máscara, inflando a bbox pro quadro inteiro. Isso
+    # sempre existiu no código, só ficava mascarado porque o kanji já
+    # preenchia quase todo o quadro; ficou visível ao testar escalas
+    # pequenas (ver docs/relatorio_n2_n5.md, seção 7.2). Aqui a cor de fundo
+    # é estimada a partir da mediana dos 4 cantos (tipicamente livres do
+    # kanji) e o limiar é definido bem abaixo dela.
+    h, w = gray.shape
+    corner_size = max(2, min(h, w) // 20)
+    corners = np.concatenate([
+        gray[:corner_size, :corner_size].ravel(),
+        gray[:corner_size, -corner_size:].ravel(),
+        gray[-corner_size:, :corner_size].ravel(),
+        gray[-corner_size:, -corner_size:].ravel(),
+    ])
+    bg_estimate = float(np.median(corners))
+    threshold = min(240.0, bg_estimate - 25.0)
+
+    mask = gray < threshold
+    ys, xs = np.where(mask)
+    if len(xs) > 0 and len(ys) > 0:
+        xmin, xmax = xs.min(), xs.max()
+        ymin, ymax = ys.min(), ys.max()
+        if xmax == xmin:
+            xmax += 1
+        if ymax == ymin:
+            ymax += 1
+    else:
+        xmin, xmax = 0, img.width
+        ymin, ymax = 0, img.height
+    return (xmin, ymin, xmax, ymax)
+
+
 def apply_augmentations(img):
     img = ink_variation(img)
 
@@ -29,6 +68,16 @@ def apply_augmentations(img):
     if random.random() > 0.3:
         angle = random.uniform(-10, 10)
         img = img.rotate(angle, resample=Image.BICUBIC, fillcolor="white")
+
+    # A bbox é medida AQUI, depois das augmentations que deslocam/deformam o
+    # kanji (elastic distortion, crop, rotação), mas ANTES das que só
+    # texturizam o fundo (paper_texture, screentone, ruído gaussiano). Essas
+    # últimas escurecem pixels em qualquer lugar da imagem, não só no kanji
+    # -- se a bbox fosse medida depois delas, um pixel de fundo escurecido
+    # num canto qualquer infla a bbox para quase o quadro inteiro (bug
+    # descoberto ao testar kanjis em escala pequena; com o kanji sempre
+    # preenchendo o quadro isso ficava mascarado). Ver docs/relatorio_n2_n5.md.
+    bbox_exact = _compute_dark_pixel_bbox(img)
 
     if random.random() > 0.5:
         img = paper_texture(img)
@@ -45,21 +94,7 @@ def apply_augmentations(img):
     if random.random() > 0.5:
         img = img.filter(ImageFilter.GaussianBlur(radius=random.uniform(0.5, 1.2)))
 
-    gray = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2GRAY)
-    mask = gray < 240
-    ys, xs = np.where(mask)
-    if len(xs) > 0 and len(ys) > 0:
-        xmin, xmax = xs.min(), xs.max()
-        ymin, ymax = ys.min(), ys.max()
-        if xmax == xmin:
-            xmax += 1
-        if ymax == ymin:
-            ymax += 1
-    else:
-        xmin, xmax = 0, img.width
-        ymin, ymax = 0, img.height
-
-    return img, (xmin, ymin, xmax, ymax)
+    return img, bbox_exact
 
 
 def elastic_distortion(img, alpha=6, sigma=20):
@@ -131,7 +166,20 @@ def generate_class_images(args):
     generated = 0
     for i in range(num_images_per_class):
         font_path = random.choice(fonts)
-        font_size = random.randint(int(img_size * 0.5), int(img_size * 0.9))
+
+        # Variação de escala/posição: por padrão o kanji sempre preenchia o
+        # quadro inteiro, centralizado. Testes pós-treino (ver
+        # docs/relatorio_n2_n5.md, seção 7.2) mostraram que um modelo
+        # treinado só assim falha em reconhecer o mesmo kanji, na mesma
+        # fonte, quando aparece pequeno dentro de uma cena maior (balão de
+        # fala, página completa) -- exatamente o caso de uso real. Uma
+        # fração das imagens agora usa escala pequena e posição aleatória
+        # para ensinar essa invariância de escala.
+        small_scale = random.random() < 0.45
+        if small_scale:
+            font_size = random.randint(int(img_size * 0.12), int(img_size * 0.35))
+        else:
+            font_size = random.randint(int(img_size * 0.5), int(img_size * 0.9))
         try:
             font = ImageFont.truetype(font_path, font_size)
         except Exception:
@@ -155,8 +203,16 @@ def generate_class_images(args):
 
         text_w = bbox_text[2] - bbox_text[0]
         text_h = bbox_text[3] - bbox_text[1]
-        x = (img_size - text_w) / 2 - bbox_text[0] + random.uniform(-20, 20)
-        y = (img_size - text_h) / 2 - bbox_text[1] + random.uniform(-20, 20)
+
+        if small_scale:
+            margin = 8
+            avail_w = max(1, img_size - text_w - 2 * margin)
+            avail_h = max(1, img_size - text_h - 2 * margin)
+            x = margin + random.uniform(0, avail_w) - bbox_text[0]
+            y = margin + random.uniform(0, avail_h) - bbox_text[1]
+        else:
+            x = (img_size - text_w) / 2 - bbox_text[0] + random.uniform(-20, 20)
+            y = (img_size - text_h) / 2 - bbox_text[1] + random.uniform(-20, 20)
 
         text_color = (
             random.randint(0, 50),

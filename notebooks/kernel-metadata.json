@@ -1,0 +1,19 @@
+{
+  "id": "joaothomaz/ic-ocr-claude",
+  "title": "ic-ocr Claude",
+  "code_file": "Kaggle_Training_Pipeline.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_tpu": false,
+  "machine_shape": "NvidiaTeslaT4",
+  "enable_internet": true,
+  "dataset_sources": [
+    "joaothomaz/ic-ocr-synthetic-dataset",
+    "joaothomaz/ic-ocr-checkpoint"
+  ],
+  "competition_sources": [],
+  "kernel_sources": [],
+  "model_sources": []
+}
