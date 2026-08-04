@@ -204,9 +204,14 @@ def sync_kernel_metadata(config: dict) -> None:
     with open(KERNEL_METADATA_FILE, "r", encoding="utf-8") as f:
         meta = json.load(f)
 
+    # Só anexa um slug como Input se o dataset já existir de fato no Kaggle --
+    # um slug "planejado" em kaggle_config.json que ainda não foi criado (ex.:
+    # setado manualmente antes da primeira rodada) faz o `kernels push` avisar
+    # "not valid dataset sources" e o pipeline abortar mesmo com o push tendo
+    # sido aceito (o Kaggle só ignora a fonte inválida e segue em frente).
     dataset_sources = [
         slug for slug in (config.get("synthetic_dataset_slug"), config.get("checkpoint_dataset_slug"))
-        if slug
+        if slug and dataset_exists(slug)
     ]
     meta["dataset_sources"] = dataset_sources
     meta["id"] = config["kernel_slug"]
