@@ -443,16 +443,34 @@ def create_or_version_dataset(slug: str, folder: Path, title: str, message: str)
 
 def find_checkpoint_run_dir(output_dir: Path) -> Path | None:
     # O ultralytics salva em <cwd>/runs/detect/<project>/<name> por padrão
-    # (confirmado na prática: runs/detect/yolo_kanji/n2_n5_model), não em
-    # <project>/<name> direto. Busca ampla via ** cobre isso e variações.
-    candidates = (
-        list(output_dir.glob("**/yolo_kanji/n2_n5_model"))
-        + list(output_dir.glob("**/runs/detect/train*"))
-    )
-    candidates = [c for c in candidates if (c / "weights" / "last.pt").exists()]
-    if not candidates:
+    # (confirmado na prática: runs/detect/yolo_kanji/n2_n5_model). Já
+    # <project>/<name> SEM o "runs/detect/" (yolo_kanji/n2_n5_model direto) é
+    # só o destino de cópia que o notebook usa pra colocar um checkpoint
+    # anexado no lugar antes do resume=True (local_run_dir) -- nunca é saída
+    # real de um treino desta sessão. Por isso runs/detect/... é sempre
+    # preferido, independente de mtime: o _output_.zip do Kaggle não
+    # preserva a ordem real de modificação dos arquivos (todos podem sair
+    # com timestamps próximos do momento em que o zip foi montado), então
+    # "pegar o mais novo por mtime" já escolheu errado na prática -- ficou
+    # com o checkpoint velho (copiado, não retreinado) mesmo quando o
+    # results.csv do diretório real já tinha as 50 épocas completas.
+    real_candidates = [
+        c for c in output_dir.glob("**/runs/detect/yolo_kanji/n2_n5_model")
+        if (c / "weights" / "last.pt").exists()
+    ]
+    if real_candidates:
+        return max(real_candidates, key=lambda p: (p / "weights" / "last.pt").stat().st_mtime)
+
+    fallback_candidates = [
+        c for c in (
+            list(output_dir.glob("**/yolo_kanji/n2_n5_model"))
+            + list(output_dir.glob("**/runs/detect/train*"))
+        )
+        if (c / "weights" / "last.pt").exists()
+    ]
+    if not fallback_candidates:
         return None
-    return max(candidates, key=lambda p: (p / "weights" / "last.pt").stat().st_mtime)
+    return max(fallback_candidates, key=lambda p: (p / "weights" / "last.pt").stat().st_mtime)
 
 
 def stage_checkpoint(run_dir: Path, staging_root: Path) -> Path:

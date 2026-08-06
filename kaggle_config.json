@@ -1,7 +1,7 @@
 {
   "kernel_slug": "joaothomaz/ic-ocr-claude",
-  "synthetic_dataset_slug": null,
-  "synthetic_dataset_path": null,
-  "checkpoint_dataset_slug": null,
-  "checkpoint_path": null
+  "synthetic_dataset_slug": "joaothomaz/ic-ocr-synthetic-dataset",
+  "synthetic_dataset_path": "/kaggle/input/ic-ocr-synthetic-dataset",
+  "checkpoint_dataset_slug": "joaothomaz/ic-ocr-checkpoint",
+  "checkpoint_path": "/kaggle/input/ic-ocr-checkpoint"
 }

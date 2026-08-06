@@ -206,6 +206,35 @@ Em resposta ao diagnóstico da Seção 7.2, `src/data/generate_synthetic_images.
 
 Esse dataset corrigido ainda não foi usado para treinar um novo modelo — o treino de 50 épocas descrito na Seção 7.1 usa o dataset **anterior** à correção (escala fixa). O retreino com o dataset corrigido é o próximo passo natural (ver Trabalhos Futuros).
 
+### 7.4 Retreino com Dataset de Escala Corrigida e Reteste
+
+O retreino descrito como trabalho futuro na Seção 7.3 foi executado (50 épocas, mesmo pipeline de automação, novamente dividido em duas sessões de 12h com resume automático via checkpoint).
+
+**Métricas finais (época 50, validação sintética, dataset corrigido):**
+
+| Métrica | Valor anterior (7.1) | Valor novo (dataset corrigido) |
+|---|---|---|
+| mAP@50 | 0.9933 | 0.9926 |
+| mAP@50-95 | 0.9905 | 0.9875 |
+| Precisão | 0.9797 | 0.9742 |
+| Recall (validação sintética) | 0.9836 | 0.9816 |
+
+As métricas de validação sintética permaneceram praticamente no mesmo patamar, confirmando que adicionar variação de escala ao dataset não prejudicou a convergência do modelo.
+
+**Reteste qualitativo (mesmas três imagens da Seção 7.2):**
+
+| Teste | Resultado (dataset anterior) | Resultado (dataset corrigido) |
+|---|---|---|
+| A — Capa de mangá real | 0 detecções | **0 detecções** (ainda com `conf=0.05`) |
+| B — Balão sintético | 0 detecções | **0 detecções** |
+| C — Controle (escala de treino) | Detectado (`学`, 0.59) | Detectado (`学`, 0.868 + 1 falso positivo secundário a 0.215) |
+
+**Diagnóstico:** a correção de escala **não resolveu** o problema de generalização para os testes A e B. Medindo a escala real do kanji nessas duas imagens: em A, o bloco de título "同級生" ocupa aproximadamente 10% da altura do quadro (860×860); em B, cada kanji do balão ocupa aproximadamente 8–9% da altura do quadro (640×640). Ambos os valores ficam **abaixo do piso de 12%** usado na variação de escala pequena introduzida na Seção 7.3 (12–35% do quadro) — ou seja, a faixa de escala pequena adicionada ainda não é pequena o suficiente para cobrir esses casos reais. Além disso, ambas as imagens têm elementos visuais que o dataset sintético não modela: em A, uma ilustração de fundo complexa (não apenas textura de papel/screentone); em B, um contorno de balão de fala e borda de painel desenhados ao redor do texto. Qualquer um dos dois fatores (escala ainda menor, ou contexto visual não modelado) pode ser a causa dominante — não é possível isolar qual dos dois pesa mais com os testes atuais.
+
+Isso não invalida a correção feita na Seção 7.3 (o bug de bounding box era real e independente desse resultado, e a variação de escala é uma condição necessária, mesmo que não suficiente), mas indica que o próximo ajuste precisa ser mais agressivo: ampliar a faixa de escala pequena para além de 12% (ex.: 5–35%) e/ou compor os kanjis sintéticos sobre fundos com mais complexidade visual (formas desenhadas, texturas de ilustração), em vez de apenas cor sólida com textura de papel/screentone.
+
+**Nota operacional:** a cota semanal de GPU do Kaggle (30h) foi esgotada durante essa rodada (reset em 2026-08-08), então um novo retreino com faixa de escala ampliada só pode ser iniciado a partir dessa data.
+
 ---
 
 ## 8. Conclusão e Trabalhos Futuros
@@ -219,7 +248,7 @@ Esse dataset corrigido ainda não foi usado para treinar um novo modelo — o tr
 
 ### Trabalhos Futuros
 
-- **Retreino com dataset de escala corrigida:** `generate_synthetic_images.py` já foi ajustado (Seção 7.3) para gerar kanjis em escalas variadas; falta rodar um novo ciclo de treino no Kaggle com esse dataset corrigido e repetir os testes qualitativos da Seção 7.2 para confirmar a melhoria
+- **Ampliar a faixa de escala pequena e a complexidade de fundo do gerador sintético:** o retreino da Seção 7.4 mostrou que a faixa de 12–35% ainda não cobre casos reais (~8–10% do quadro) nem a complexidade visual de capas/balões reais; próximo ajuste deve estender a faixa (ex.: 5–35%) e compor os kanjis sobre fundos com formas/texturas mais próximas de uma página real, não apenas cor sólida com textura de papel
 - **Distilação do modelo:** Treinar um modelo YOLOv8s (Small) com os pesos do Nano como teacher para ganhar precisão em N2
 - **Dataset real aumentado:** Integrar dados reais do Manga109 com pesos de amostragem para substituir o dataset puramente sintético na fase final
 - **Filtragem por confiança adaptativa:** Threshold dinâmico baseado na complexidade visual do frame capturado
