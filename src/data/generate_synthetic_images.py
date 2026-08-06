@@ -43,17 +43,63 @@ def _compute_dark_pixel_bbox(img):
 
     mask = gray < threshold
     ys, xs = np.where(mask)
-    if len(xs) > 0 and len(ys) > 0:
-        xmin, xmax = xs.min(), xs.max()
-        ymin, ymax = ys.min(), ys.max()
-        if xmax == xmin:
-            xmax += 1
-        if ymax == ymin:
-            ymax += 1
-    else:
-        xmin, xmax = 0, img.width
-        ymin, ymax = 0, img.height
+    if len(xs) == 0 or len(ys) == 0:
+        # Nenhum pixel escuro sobrou -- com kanji pequeno e perto de uma
+        # borda (faixa de escala ampliada na Seção 7.4), o random_crop às
+        # vezes corta o kanji inteiro pra fora do quadro. Cair pro quadro
+        # inteiro aqui (como antes) gera um label errado; melhor sinalizar
+        # com None e deixar generate_class_images descartar essa amostra.
+        return None
+    xmin, xmax = xs.min(), xs.max()
+    ymin, ymax = ys.min(), ys.max()
+    if xmax == xmin:
+        xmax += 1
+    if ymax == ymin:
+        ymax += 1
     return (xmin, ymin, xmax, ymax)
+
+
+def draw_speech_bubble(img):
+    # Simula o contorno de um balão de fala ao redor da região do kanji.
+    # Desenhado só depois da bbox já ter sido medida (ver apply_augmentations),
+    # entao nao interfere no calculo do label.
+    draw = ImageDraw.Draw(img)
+    w, h = img.size
+    cx = random.uniform(0.3, 0.7) * w
+    cy = random.uniform(0.3, 0.7) * h
+    rw = random.uniform(0.45, 0.95) * w / 2
+    rh = random.uniform(0.3, 0.7) * h / 2
+    color = (random.randint(0, 60),) * 3
+    draw.ellipse((cx - rw, cy - rh, cx + rw, cy + rh), outline=color, width=random.randint(2, 4))
+    return img
+
+
+def draw_panel_border(img):
+    # Simula a borda de um painel de mangá em volta do quadro inteiro.
+    draw = ImageDraw.Draw(img)
+    w, h = img.size
+    inset = random.randint(2, 12)
+    color = (random.randint(0, 40),) * 3
+    draw.rectangle((inset, inset, w - inset, h - inset), outline=color, width=random.randint(2, 5))
+    return img
+
+
+def add_background_clutter(img):
+    # Formas simples e claras espalhadas pelo fundo, simulando elementos de
+    # cena (traços de ilustração, sombreamento) sem se confundir com o
+    # kanji (tom sempre bem mais claro que a tinta do texto).
+    draw = ImageDraw.Draw(img)
+    w, h = img.size
+    for _ in range(random.randint(2, 6)):
+        shade = random.randint(180, 230)
+        color = (shade, shade, shade)
+        x1, y1 = random.uniform(0, w), random.uniform(0, h)
+        x2, y2 = random.uniform(0, w), random.uniform(0, h)
+        if random.random() > 0.5:
+            draw.line((x1, y1, x2, y2), fill=color, width=random.randint(1, 3))
+        else:
+            draw.rectangle((min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2)), outline=color, width=1)
+    return img
 
 
 def apply_augmentations(img):
@@ -78,6 +124,23 @@ def apply_augmentations(img):
     # descoberto ao testar kanjis em escala pequena; com o kanji sempre
     # preenchendo o quadro isso ficava mascarado). Ver docs/relatorio_n2_n5.md.
     bbox_exact = _compute_dark_pixel_bbox(img)
+    if bbox_exact is None:
+        return img, None
+
+    # Contexto de cena (balão, borda de painel, ruído de fundo): testes
+    # qualitativos pós-treino (docs/relatorio_n2_n5.md, Secao 7.4) mostraram
+    # que mesmo com variação de escala o modelo falhava em imagens reais que
+    # têm elementos visuais nunca vistos no treino (contorno de balão, borda
+    # de painel, ilustração de fundo). Adicionados aqui, depois da bbox já
+    # medida, pelo mesmo motivo do texturizado abaixo.
+    if random.random() > 0.65:
+        img = draw_speech_bubble(img)
+
+    if random.random() > 0.75:
+        img = draw_panel_border(img)
+
+    if random.random() > 0.6:
+        img = add_background_clutter(img)
 
     if random.random() > 0.5:
         img = paper_texture(img)
@@ -174,10 +237,13 @@ def generate_class_images(args):
         # fonte, quando aparece pequeno dentro de uma cena maior (balão de
         # fala, página completa) -- exatamente o caso de uso real. Uma
         # fração das imagens agora usa escala pequena e posição aleatória
-        # para ensinar essa invariância de escala.
-        small_scale = random.random() < 0.45
+        # para ensinar essa invariância de escala. O piso da faixa pequena
+        # foi ampliado de 12% para 5% do quadro (Seção 7.4): medindo os
+        # casos reais que falharam no primeiro reteste, o kanji ocupava
+        # ~8-10% do quadro, abaixo do piso original de 12%.
+        small_scale = random.random() < 0.55
         if small_scale:
-            font_size = random.randint(int(img_size * 0.12), int(img_size * 0.35))
+            font_size = random.randint(int(img_size * 0.05), int(img_size * 0.35))
         else:
             font_size = random.randint(int(img_size * 0.5), int(img_size * 0.9))
         try:
@@ -222,6 +288,11 @@ def generate_class_images(args):
         draw.text((x, y), kanji, font=font, fill=text_color)
 
         img, bbox_exact = apply_augmentations(img)
+        if bbox_exact is None:
+            # O random_crop cortou o kanji inteiro pra fora do quadro (mais
+            # comum com kanji pequeno perto de uma borda); descarta a
+            # amostra em vez de gravar um label incorreto.
+            continue
         xmin, ymin, xmax, ymax = bbox_exact
 
         img_w, img_h = img.size
