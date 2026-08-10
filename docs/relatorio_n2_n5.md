@@ -235,6 +235,41 @@ Isso não invalida a correção feita na Seção 7.3 (o bug de bounding box era 
 
 **Nota operacional:** a cota semanal de GPU do Kaggle (30h) foi esgotada durante essa rodada (reset em 2026-08-08), então um novo retreino com faixa de escala ampliada só pode ser iniciado a partir dessa data.
 
+### 7.5 Retreino com Escala Ampliada e Contexto Visual Sintético
+
+Com a cota de GPU renovada em 2026-08-08, `generate_synthetic_images.py` foi ajustado novamente, seguindo o diagnóstico da Seção 7.4:
+
+1. **Faixa de escala pequena ampliada:** piso reduzido de 12% para 5% do quadro (cobrindo os ~8–10% medidos nos casos reais), e a proporção de amostras nessa faixa aumentada de 45% para 55%.
+2. **Contexto visual sintético:** três novos elementos desenhados sobre o fundo, com probabilidade independente cada — contorno de balão de fala, borda de painel, e "clutter" de fundo (linhas e retângulos claros simulando ilustração/screentone) — aplicados antes da textura de papel, sem alterar a bbox já calculada.
+3. **Bug novo, exposto pela mudança (1):** com kanjis muito pequenos perto da borda do quadro, o corte aleatório (`random_crop`) passou a às vezes remover o kanji inteiramente do quadro, deixando zero pixels escuros. O fallback antigo (bbox = quadro inteiro) gerava um rótulo incorreto nesse caso; corrigido para descartar a amostra (`bbox = None` → `continue`) em vez de gerar um label errado. Validado com 2000 sementes reproduzíveis: 0 bboxes incorretas, 7 amostras corretamente descartadas.
+
+O retreino rodou por 3 sessões de até 12h (resume automático via checkpoint), totalizando 50 épocas.
+
+**Bug de monitoramento encontrado durante o retreino:** o script de orquestração local (`retrain_driver.py`, fora do repositório) decide se o treino terminou contando linhas de `results.csv`. Isso funcionou nas Seções 7.1/7.4, mas quebrou aqui porque, ao dar resume, o Ultralytics recria `results.csv` do zero em vez de continuar o arquivo anterior — então a contagem de linhas reflete só as épocas rodadas *nessa sessão*, não o total acumulado. Ao fim da sessão 2 (época real 48/50), o driver leu erroneamente "26/50" (contagem de linhas) e teria disparado uma 3ª sessão completa desnecessária. Corrigido lendo o valor máximo da própria coluna `epoch` do CSV (que é o índice global, não reiniciado) em vez do número de linhas — o processo local foi reiniciado com a correção (sem reenviar o kernel, já em execução) e a sessão 3 terminou corretamente após apenas 2 épocas adicionais, confirmada por status `COMPLETE` (finalização natural) em vez de `CANCEL_ACKNOWLEDGED` (corte por limite de 12h).
+
+**Métricas finais (época 50, validação sintética):**
+
+| Métrica | Valor anterior (7.4) | Valor novo (escala ampliada + contexto) |
+|---|---|---|
+| mAP@50 | 0.9926 | 0.9850 |
+| mAP@50-95 | 0.9875 | 0.9614 |
+| Precisão | 0.9742 | 0.9810 |
+| Recall (validação sintética) | 0.9816 | 0.9642 |
+
+A queda nas métricas sintéticas é esperada e consistente com o objetivo: o novo dataset é estritamente mais difícil (kanjis menores, mais elementos visuais competindo pela atenção do modelo), então uma pequena perda de desempenho na validação sintética em troca de melhor generalização para imagens reais é o trade-off pretendido.
+
+**Reteste qualitativo (mesmas três imagens das Seções 7.2 e 7.4):**
+
+| Teste | Resultado (7.4, escala corrigida) | Resultado (7.5, escala ampliada + contexto) |
+|---|---|---|
+| A — Capa de mangá real | 0 detecções | **1 detecção** — bbox localiza corretamente o bloco "同級生" inteiro, mas classificado como `UNKNOWN_N1` (confiança 0.272) |
+| B — Balão sintético | 0 detecções | **1 detecção** — bbox localiza corretamente o kanji "今", mas classificado como `UNKNOWN_N1` (confiança 0.082) |
+| C — Controle (escala de treino) | Detectado (`学`, 0.868) | Detectado (`学`, 0.987) |
+
+**Diagnóstico:** houve progresso real, mas parcial. Pela primeira vez o modelo **localiza** texto em kanji nas imagens A e B — antes, a rede nem sequer gerava uma caixa candidata nessa região, então o problema era de detecção (recall de localização). Agora o problema restante é de **classificação com baixa confiança**: em ambos os casos, o kanji correto está dentro da caixa, mas o modelo o rotula como `UNKNOWN_N1` (a classe sentinela de rejeição N1, Seção 3.2) em vez do caractere real — apesar de "同", "級", "生" (teste A) e "今" (teste B) serem todos kanjis N2-N5 comuns, não N1. Isso é uma classificação incorreta, não uma rejeição válida. A causa provável é que o dataset sintético, mesmo com a escala e o contexto visual mais próximos do real, ainda usa uma única fonte (NotoSansCJKjp) e composições sintéticas — a rede aprendeu a *encontrar* kanjis em cenas mais variadas, mas ainda não generaliza a *classificação* fina para o estilo tipográfico e a textura de imagens reais de mangá. Além disso, no teste A a caixa detectada engloba os três kanji juntos como um único bounding box, enquanto o treino sempre usa um kanji por caixa — sugerindo que o modelo está usando o bloco de texto como pista de localização (contraste alto vs. fundo) mais do que reconhecendo caracteres individuais nessa imagem.
+
+**Nota operacional:** treino executado em 3 sessões de GPU (~12h, ~12h, ~1h), dentro da cota semanal renovada em 2026-08-08.
+
 ---
 
 ## 8. Conclusão e Trabalhos Futuros
@@ -248,7 +283,8 @@ Isso não invalida a correção feita na Seção 7.3 (o bug de bounding box era 
 
 ### Trabalhos Futuros
 
-- **Ampliar a faixa de escala pequena e a complexidade de fundo do gerador sintético:** o retreino da Seção 7.4 mostrou que a faixa de 12–35% ainda não cobre casos reais (~8–10% do quadro) nem a complexidade visual de capas/balões reais; próximo ajuste deve estender a faixa (ex.: 5–35%) e compor os kanjis sobre fundos com formas/texturas mais próximas de uma página real, não apenas cor sólida com textura de papel
+- **Diversificar fonte e composição do dataset sintético:** o retreino da Seção 7.5 resolveu a localização em imagens reais (antes 0 detecções, agora bbox correta), mas a classificação nessas imagens ainda erra para a classe sentinela `UNKNOWN_N1`. Como o gerador usa uma única fonte (NotoSansCJKjp), a hipótese principal é falta de diversidade tipográfica/textural — próximo passo é adicionar mais fontes CJK e variar a textura/cor de fundo de forma mais próxima de capas de mangá reais (não apenas formas geométricas sintéticas)
+- **Detecção por caractere individual em blocos de texto:** no teste A (Seção 7.5), o modelo devolveu uma única caixa para os três kanji do título, em vez de uma caixa por caractere como no treino — investigar se isso é um efeito de NMS (non-max suppression) agressivo ou uma limitação de resolução em blocos de texto denso
 - **Distilação do modelo:** Treinar um modelo YOLOv8s (Small) com os pesos do Nano como teacher para ganhar precisão em N2
 - **Dataset real aumentado:** Integrar dados reais do Manga109 com pesos de amostragem para substituir o dataset puramente sintético na fase final
 - **Filtragem por confiança adaptativa:** Threshold dinâmico baseado na complexidade visual do frame capturado
