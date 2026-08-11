@@ -59,6 +59,152 @@ def _compute_dark_pixel_bbox(img):
     return (xmin, ymin, xmax, ymax)
 
 
+def _estimate_bg_threshold(gray):
+    h, w = gray.shape
+    corner_size = max(2, min(h, w) // 20)
+    corners = np.concatenate([
+        gray[:corner_size, :corner_size].ravel(),
+        gray[:corner_size, -corner_size:].ravel(),
+        gray[-corner_size:, :corner_size].ravel(),
+        gray[-corner_size:, -corner_size:].ravel(),
+    ])
+    bg_estimate = float(np.median(corners))
+    return min(240.0, bg_estimate - 25.0)
+
+
+def _measure_char_bbox_in_cell(gray, cell, threshold):
+    x0, y0, x1, y1 = cell
+    region = gray[y0:y1, x0:x1]
+    mask = region < threshold
+    ys, xs = np.where(mask)
+    if len(xs) == 0:
+        return None
+    xmin, xmax = int(xs.min()), int(xs.max())
+    ymin, ymax = int(ys.min()), int(ys.max())
+    return (x0 + xmin, y0 + ymin, x0 + xmax + 1, y0 + ymax + 1)
+
+
+def generate_dense_text_sample(kanji, kanji_list, kanji_to_id, font_path, img_size):
+    # Motivação (docs/relatorio_n2_n5.md, Secao 7.5): o gerador original so
+    # desenha UM kanji isolado por imagem. Num teste real (capa de manga com
+    # "同級生"), o modelo devolveu uma unica bbox englobando os tres
+    # caracteres em vez de uma por caractere -- ele nunca viu kanji vizinhos
+    #/tocando no treino. Esta funcao desenha um bloco de 2-4 kanji lado a
+    # lado (um deles é sempre a classe-alvo `kanji`, os demais sorteados do
+    # vocabulario inteiro) e devolve uma bbox por caractere, para ensinar
+    # essa distincao.
+    #
+    # Para manter a extracao de bbox por caractere confiavel, distorcoes
+    # geometricas (elastic_distortion, random_crop, rotacao) NAO sao
+    # aplicadas aqui -- elas deslocariam cada caractere de forma
+    # independente e tornariam a bbox nominal por celula invalida. As
+    # augmentations de textura/cena (apply_scene_augmentations) continuam
+    # valendo, pois só alteram intensidade de pixel, não geometria.
+    n_chars = random.randint(2, 4)
+    target_idx = random.randint(0, n_chars - 1)
+    chars = [kanji if i == target_idx else random.choice(kanji_list) for i in range(n_chars)]
+
+    small_scale = random.random() < 0.55
+    if small_scale:
+        font_size = random.randint(int(img_size * 0.04), int(img_size * 0.12))
+    else:
+        font_size = random.randint(int(img_size * 0.12), int(img_size * 0.22))
+    try:
+        font = ImageFont.truetype(font_path, font_size)
+    except Exception:
+        return None
+
+    spacing = random.uniform(-0.05, 0.15) * font_size
+    advances = []
+    for ch in chars:
+        try:
+            adv = font.getlength(ch)
+        except Exception:
+            adv = font_size
+        advances.append(adv)
+    block_w = sum(advances) + spacing * (n_chars - 1)
+    block_h = font_size * 1.3
+
+    margin = 8
+    if block_w > img_size - 2 * margin or block_h > img_size - 2 * margin:
+        return None
+
+    if small_scale:
+        avail_w = max(1.0, img_size - block_w - 2 * margin)
+        avail_h = max(1.0, img_size - block_h - 2 * margin)
+        start_x = margin + random.uniform(0, avail_w)
+        start_y = margin + random.uniform(0, avail_h)
+    else:
+        start_x = (img_size - block_w) / 2 + random.uniform(-20, 20)
+        start_y = (img_size - block_h) / 2 + random.uniform(-20, 20)
+        start_x = max(margin, min(img_size - block_w - margin, start_x))
+        start_y = max(margin, min(img_size - block_h - margin, start_y))
+
+    bg_color = (
+        random.randint(230, 255),
+        random.randint(230, 255),
+        random.randint(230, 255),
+    )
+    img = Image.new("RGB", (img_size, img_size), bg_color)
+    draw = ImageDraw.Draw(img)
+    text_color = (
+        random.randint(0, 50),
+        random.randint(0, 50),
+        random.randint(0, 50),
+    )
+
+    cells = []
+    x = start_x
+    for ch, adv in zip(chars, advances):
+        try:
+            char_bbox = font.getbbox(ch)
+        except Exception:
+            char_bbox = draw.textbbox((0, 0), ch, font=font)
+        draw.text((x - char_bbox[0], start_y - char_bbox[1]), ch, font=font, fill=text_color)
+        cell = (
+            int(max(0, x - 2)),
+            int(max(0, start_y - 2)),
+            int(min(img_size, x + adv + 2)),
+            int(min(img_size, start_y + block_h + 2)),
+        )
+        cells.append((ch, cell))
+        x += adv + spacing
+
+    img = ink_variation(img)
+
+    gray = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2GRAY)
+    threshold = _estimate_bg_threshold(gray)
+
+    labels = []
+    target_found = False
+    for ch, cell in cells:
+        bbox = _measure_char_bbox_in_cell(gray, cell, threshold)
+        if bbox is None:
+            continue
+        cid = kanji_to_id.get(ch)
+        if cid is None:
+            continue
+        xmin, ymin, xmax, ymax = bbox
+        width = xmax - xmin
+        height = ymax - ymin
+        cx = max(0.0, min(1.0, (xmin + width / 2) / img_size))
+        cy = max(0.0, min(1.0, (ymin + height / 2) / img_size))
+        w = max(0.0, min(1.0, width / img_size))
+        h = max(0.0, min(1.0, height / img_size))
+        labels.append((cid, cx, cy, w, h))
+        if ch == kanji and cid == kanji_to_id.get(kanji):
+            target_found = True
+
+    if not target_found:
+        # A bbox da classe-alvo é a que precisa estar presente; se ela se
+        # perdeu (ex: caractere caiu quase todo fora do frame), descarta a
+        # amostra em vez de gravar um label sem o alvo.
+        return None
+
+    img = apply_scene_augmentations(img)
+    return img, labels
+
+
 def draw_speech_bubble(img):
     # Simula o contorno de um balão de fala ao redor da região do kanji.
     # Desenhado só depois da bbox já ter sido medida (ver apply_augmentations),
@@ -127,12 +273,20 @@ def apply_augmentations(img):
     if bbox_exact is None:
         return img, None
 
+    img = apply_scene_augmentations(img)
+    return img, bbox_exact
+
+
+def apply_scene_augmentations(img):
     # Contexto de cena (balão, borda de painel, ruído de fundo): testes
     # qualitativos pós-treino (docs/relatorio_n2_n5.md, Secao 7.4) mostraram
     # que mesmo com variação de escala o modelo falhava em imagens reais que
     # têm elementos visuais nunca vistos no treino (contorno de balão, borda
-    # de painel, ilustração de fundo). Adicionados aqui, depois da bbox já
-    # medida, pelo mesmo motivo do texturizado abaixo.
+    # de painel, ilustração de fundo). Chamada depois da(s) bbox(es) já
+    # medida(s), pelo mesmo motivo do texturizado abaixo -- e reaproveitada
+    # tanto pelo caminho de kanji único quanto pelo bloco de texto denso
+    # (generate_dense_text_sample) já que nenhuma dessas augmentations move
+    # geometria, só altera intensidade/textura de pixel.
     if random.random() > 0.65:
         img = draw_speech_bubble(img)
 
@@ -157,7 +311,7 @@ def apply_augmentations(img):
     if random.random() > 0.5:
         img = img.filter(ImageFilter.GaussianBlur(radius=random.uniform(0.5, 1.2)))
 
-    return img, bbox_exact
+    return img
 
 
 def elastic_distortion(img, alpha=6, sigma=20):
@@ -220,8 +374,11 @@ def screentone(img):
     return Image.fromarray(img_np).convert("RGB")
 
 
+DENSE_TEXT_PROB = 0.3  # ver generate_dense_text_sample: fracao de amostras com 2-4 kanji lado a lado
+
+
 def generate_class_images(args):
-    class_id, kanji, num_images_per_class, img_size, output_dir, train_split_ratio, fonts = args
+    class_id, kanji, num_images_per_class, img_size, output_dir, train_split_ratio, fonts, kanji_list, kanji_to_id = args
 
     np.random.seed()
     random.seed()
@@ -229,6 +386,25 @@ def generate_class_images(args):
     generated = 0
     for i in range(num_images_per_class):
         font_path = random.choice(fonts)
+
+        if random.random() < DENSE_TEXT_PROB:
+            result = generate_dense_text_sample(kanji, kanji_list, kanji_to_id, font_path, img_size)
+            if result is None:
+                continue
+            img, labels = result
+
+            split = "train" if random.random() < train_split_ratio else "val"
+            filename_base = f"{class_id}_{str(i).zfill(5)}"
+            img_path = os.path.join(output_dir, "images", split, f"{filename_base}.jpg")
+            txt_path = os.path.join(output_dir, "labels", split, f"{filename_base}.txt")
+
+            img.save(img_path)
+            with open(txt_path, "w") as f:
+                for cid, cx, cy, w, h in labels:
+                    f.write(f"{cid} {cx:.6f} {cy:.6f} {w:.6f} {h:.6f}\n")
+
+            generated += 1
+            continue
 
         # Variação de escala/posição: por padrão o kanji sempre preenchia o
         # quadro inteiro, centralizado. Testes pós-treino (ver
@@ -334,8 +510,9 @@ def create_synthetic_dataset(output_dir, num_images_per_class, kanji_list, train
     print(f"Gerando {num_images_per_class} imagens para {len(kanji_list)} classes...")
     print(f"Total esperado: {len(kanji_list) * num_images_per_class} imagens")
 
+    kanji_to_id = {k: i for i, k in enumerate(kanji_list)}
     args_list = [
-        (class_id, kanji, num_images_per_class, img_size, output_dir, train_split_ratio, fonts)
+        (class_id, kanji, num_images_per_class, img_size, output_dir, train_split_ratio, fonts, kanji_list, kanji_to_id)
         for class_id, kanji in enumerate(kanji_list)
     ]
 
